@@ -15,7 +15,7 @@ This bot is a work in progress. It's been tested in paper trading mode, but:
 - The algorithm is still being tuned
 - Market conditions change
 - Past performance ≠ future results
-- Bugs happen (we're human, the code might have issues)
+- Bugs happen
 - Prediction markets are volatile and unpredictable
 
 **You are free to use, modify, and adapt this code however you like.** However, if you decide to use this for real trading and lose your Christmas money, your life savings, or your firstborn's college fund, please don't come complaining to me. I warned you. 🤷
@@ -62,8 +62,8 @@ The core algorithm analyzes trade activity within a rolling time window:
 
 **Momentum Thresholds** (all must be met):
 
-- `MOMENTUM_MIN_VOLUME`: Minimum total contracts traded
-- `MOMENTUM_MIN_TRADES`: Minimum number of separate trades
+- `MOMENTUM_MIN_VOLUME`: Minimum total volume traded
+- `MOMENTUM_MIN_TRADES`: Minimum number of separate trades (only counts trades sent through the API, not trades done directly on Kalshi)
 - `MOMENTUM_MIN_DIRECTIONAL_BIAS`: Minimum directional strength (e.g., 0.75 = 75%+ in one direction)
 
 **Momentum Trigger Logic**:
