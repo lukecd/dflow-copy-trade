@@ -6,7 +6,7 @@ A TypeScript CLI tool for automated copy trading on DFlow's Kalshi prediction ma
 
 This bot monitors live trade execution data from DFlow's WebSocket API, identifies markets with strong momentum signals, and simulates trading positions to track profitability. It's designed for paper trading (simulated trading) to test strategies before risking real capital.
 
-## ⚠️ Caveat Emptor (Buyer Beware)
+## ⚠️ Caveat Emptor
 
 **This is experimental software. Use at your own risk.**
 
@@ -91,8 +91,6 @@ trades >= MOMENTUM_MIN_TRADES
 - Respects `MAX_OPEN_POSITIONS` limit
 - Entry price: Uses the trade execution price from the momentum trigger
 - Position size: Fixed dollar amount (`POSITION_SIZE` in dollars)
-  - Number of contracts is calculated automatically: `contracts = (POSITION_SIZE * 100) / entry_price_in_cents`
-  - Example: $1.00 position at 50 cents entry = 2 contracts
 
 **Monitoring**:
 
@@ -138,8 +136,7 @@ cp .env.example .env
 
 4. Edit `.env` and set `DFLOW_ENDPOINT`:
 
-   - For development: `dev-prediction-markets-api.dflow.net`
-   - For production: `prediction-markets-api.dflow.net`
+   - **Get the correct endpoint from the [DFlow documentation](https://pond.dflow.net/introduction)**
 
 5. Build the project:
 
@@ -157,7 +154,7 @@ cp .env.example .env
 
 **Required Configuration:**
 
-- `DFLOW_ENDPOINT` - Must be set to your desired endpoint (see below)
+- `DFLOW_ENDPOINT` - **REQUIRED**: Get the correct endpoint from the [DFlow docs](https://pond.dflow.net/introduction)
 
 All other variables have sensible defaults. Here are the available options:
 
@@ -165,9 +162,9 @@ All other variables have sensible defaults. Here are the available options:
 
 ```env
 # DFlow API endpoint
-# Use dev-prediction-markets-api.dflow.net for dev
-# Use prediction-markets-api.dflow.net for production
-DFLOW_ENDPOINT=dev-prediction-markets-api.dflow.net
+# REQUIRED: Get the correct endpoint from the DFlow documentation
+# See: https://pond.dflow.net/introduction
+DFLOW_ENDPOINT=
 ```
 
 ### Market Filtering
