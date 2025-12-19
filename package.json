@@ -1,0 +1,34 @@
+{
+  "name": "dflow-copy-trade",
+  "version": "1.0.0",
+  "description": "TypeScript CLI for copy trading using DFlow Kalshi API",
+  "main": "dist/index.js",
+  "bin": {
+    "dflow-copy-trade": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "dflow",
+    "copy-trading",
+    "prediction-markets",
+    "kalshi"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "commander": "^12.1.0",
+    "dotenv": "^17.2.3",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.3",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}

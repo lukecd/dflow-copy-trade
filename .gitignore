@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.log
+copy-trade-config.json
+.DS_Store
+.env
+*.tsbuildinfo
+trades.jsonl
+
