@@ -6,4 +6,5 @@ copy-trade-config.json
 .env
 *.tsbuildinfo
 trades.jsonl
+momentum-signals.jsonl
 

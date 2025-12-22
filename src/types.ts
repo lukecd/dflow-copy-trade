@@ -80,5 +80,14 @@ export interface Position {
   entryTime: number;
   entryTradeId: string;
   lastLoggedPnLPercent?: number; // Track last logged P&L to avoid spam
+  // Real trading fields (only set when PAPER_TRADE_ONLY=0)
+  transactionSignature?: string; // Solana transaction signature
+  executionMode?: "sync" | "async"; // Execution mode from order response
+  isFilled?: boolean; // Whether the order has been filled (for async trades)
+}
+
+export interface OrderStatus {
+  status: "open" | "closed" | "pendingClose" | "failed";
+  fills?: Array<{ amount: number; price: number }>;
 }
 

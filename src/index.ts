@@ -22,6 +22,15 @@ import dotenv from "dotenv";
 import { writeFileSync, appendFileSync, existsSync } from "fs";
 import { join } from "path";
 import { TradeUpdate, Market, MomentumMetrics, Position } from "./types";
+import { startServer, stopServer } from "./server";
+import {
+  initializeTrading,
+  getOutcomeTokenMints,
+  executeBuyOrder,
+  executeSellOrder,
+  checkOrderStatus,
+  getTokenBalance,
+} from "./trade-executor";
 
 // Load environment variables from .env file
 dotenv.config();
@@ -68,8 +77,28 @@ const COOLDOWN_TIME_MS = parseInt(process.env.COOLDOWN_TIME || "60000", 10); // 
 const SHOW_SKIPPED_TRADES = parseInt(process.env.SHOW_SKIPPED_TRADES || "0", 10) !== 0;
 const SHOW_MOMENTUM_BUILDING = parseInt(process.env.SHOW_MOMENTUM_BUILDING || "0", 10) !== 0;
 
+// Real trading configuration
+const PAPER_TRADE_ONLY = parseInt(process.env.PAPER_TRADE_ONLY || "1", 10) !== 0; // Default: paper trading only
+
+// Initialize real trading if enabled
+if (!PAPER_TRADE_ONLY) {
+  try {
+    initializeTrading();
+    console.log("⚠️  REAL TRADING ENABLED - You are risking real money!");
+  } catch (error) {
+    console.error("❌ Failed to initialize real trading:", error);
+    console.error("Falling back to paper trading mode.");
+    // Continue with paper trading
+  }
+} else {
+  console.log("📊 Paper trading mode enabled (PAPER_TRADE_ONLY=1)");
+}
+
 // Cache for market data to avoid repeated API calls
 const marketCache = new Map<string, Market>();
+
+// HTTP server configuration
+const UI_PORT = parseInt(process.env.UI_PORT || "3001", 10);
 
 // Momentum tracking: Map<ticker, Array<{trade, timestamp}>>
 const momentumTrades = new Map<string, Array<{ trade: TradeUpdate; timestamp: number }>>();
@@ -157,6 +186,29 @@ function logTradeToFile(trade: ClosedTrade) {
     ...trade,
     entryTime: new Date(trade.entryTime).toISOString(),
     exitTime: new Date(trade.exitTime).toISOString(),
+  }) + "\n";
+  
+  appendFileSync(logFile, logEntry, "utf-8");
+}
+
+/**
+ * Logs momentum signals to momentum-signals.jsonl file
+ * This helps analyze entry timing and signal quality
+ */
+function logMomentumSignal(data: {
+  timestamp: number;
+  ticker: string;
+  tradeId: string;
+  momentumMetrics: MomentumMetrics;
+  triggeredEntry: boolean;
+  reason?: string; // Why it didn't trigger (if triggeredEntry is false)
+  entryPrice?: number; // If entry was made, include entry price
+  contracts?: number; // If entry was made, include contracts
+}) {
+  const logFile = join(process.cwd(), "momentum-signals.jsonl");
+  const logEntry = JSON.stringify({
+    ...data,
+    timestamp: new Date(data.timestamp).toISOString(),
   }) + "\n";
   
   appendFileSync(logFile, logEntry, "utf-8");
@@ -334,12 +386,12 @@ function checkMomentum(ticker: string): boolean {
 }
 
 /**
- * Opens a paper trading position based on momentum signal
+ * Opens a position based on momentum signal (paper or real trading)
  * Checks for existing positions, max positions limit, and cooldown before opening
  * @param trade The trade update that triggered the momentum signal
  * @param metrics The momentum metrics that met the thresholds
  */
-function openPosition(trade: TradeUpdate, metrics: MomentumMetrics): void {
+async function openPosition(trade: TradeUpdate, metrics: MomentumMetrics): Promise<void> {
   const ticker = trade.market_ticker;
   
   // Don't open if we already have a position
@@ -352,24 +404,20 @@ function openPosition(trade: TradeUpdate, metrics: MomentumMetrics): void {
     return;
   }
   
-  // Check cooldown
+  // Check cooldown - ALWAYS enforce cooldown to prevent rapid re-entry
   const cooldown = tickerCooldowns.get(ticker);
   if (cooldown) {
     const cooldownAge = Date.now() - cooldown.timestamp;
-    const shouldCooldown = 
-      (cooldown.wasWin && WIN_COOLDOWN_ENABLED) ||
-      (!cooldown.wasWin && LOSS_COOLDOWN_ENABLED);
     
-    if (shouldCooldown && cooldownAge < COOLDOWN_TIME_MS) {
-      const remainingSeconds = ((COOLDOWN_TIME_MS - cooldownAge) / 1000).toFixed(1);
+    // Always enforce cooldown if it hasn't expired, regardless of win/loss settings
+    // This prevents rapid re-entry on the same ticker
+    if (cooldownAge < COOLDOWN_TIME_MS) {
       // Silently skip - don't log to avoid spam
       return;
     }
     
     // Cooldown expired, remove it
-    if (cooldownAge >= COOLDOWN_TIME_MS) {
-      tickerCooldowns.delete(ticker);
-    }
+    tickerCooldowns.delete(ticker);
   }
   
   // Determine direction based on momentum
@@ -385,19 +433,7 @@ function openPosition(trade: TradeUpdate, metrics: MomentumMetrics): void {
     return;
   }
   
-  const position: Position = {
-    ticker,
-    side,
-    entryPrice,
-    contracts: contracts,
-    entryTime: Date.now(),
-    entryTradeId: trade.trade_id,
-  };
-  
-  positions.set(ticker, position);
-  positionMomentumMetrics.set(ticker, metrics);
-  
-  // Log momentum triggered and position opened together
+  // Log momentum triggered
   console.log("🚀 MOMENTUM TRIGGERED - Copy trade candidate:", {
     ticker: trade.market_ticker,
     tradeId: trade.trade_id,
@@ -414,13 +450,128 @@ function openPosition(trade: TradeUpdate, metrics: MomentumMetrics): void {
     },
   });
   
-  console.log(`📈 OPENED POSITION: ${ticker}`, {
-    side: side.toUpperCase(),
-    contracts: contracts,
-    entryPrice: entryPrice,
-    entryPriceDollars: `$${(entryPrice / 100).toFixed(4)}`,
-    positionSize: `$${POSITION_SIZE_DOLLARS.toFixed(2)}`,
-  });
+  if (PAPER_TRADE_ONLY) {
+    // Paper trading - just track the position
+    const position: Position = {
+      ticker,
+      side,
+      entryPrice,
+      contracts: contracts,
+      entryTime: Date.now(),
+      entryTradeId: trade.trade_id,
+    };
+    
+    positions.set(ticker, position);
+    positionMomentumMetrics.set(ticker, metrics);
+    
+    // Log entry with momentum context
+    logMomentumSignal({
+      timestamp: Date.now(),
+      ticker,
+      tradeId: trade.trade_id,
+      momentumMetrics: metrics,
+      triggeredEntry: true,
+      entryPrice,
+      contracts,
+    });
+    
+    console.log(`📈 OPENED PAPER POSITION: ${ticker}`, {
+      side: side.toUpperCase(),
+      contracts: contracts,
+      entryPrice: entryPrice,
+      entryPriceDollars: `$${(entryPrice / 100).toFixed(4)}`,
+      positionSize: `$${POSITION_SIZE_DOLLARS.toFixed(2)}`,
+    });
+  } else {
+    // Real trading - execute actual order
+    try {
+      // Get market data to extract outcome token mints
+      const market = await fetchMarket(ticker);
+      if (!market) {
+        console.error(`❌ Cannot open real position: failed to fetch market data for ${ticker}`);
+        return;
+      }
+      
+      const outcomeMints = getOutcomeTokenMints(market);
+      if (!outcomeMints) {
+        console.error(`❌ Cannot open real position: failed to extract outcome token mints for ${ticker}`);
+        return;
+      }
+      
+      // Determine outcome token mint based on side
+      const outcomeMint = side === "yes" ? outcomeMints.yesMint : outcomeMints.noMint;
+      
+      // TODO: Get settlement token mint from market data or config
+      // For now, using USDC mainnet mint address
+      // EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v is USDC on Solana mainnet
+      const settlementMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"; // USDC
+      
+      // Calculate amount in settlement token (USDC has 6 decimals)
+      // POSITION_SIZE_DOLLARS is in dollars, convert to smallest unit (micro-USDC)
+      const amount = Math.floor(POSITION_SIZE_DOLLARS * 1_000_000); // USDC has 6 decimals
+      
+      console.log(`🔄 Executing REAL trade: ${ticker} ${side.toUpperCase()} ${contracts} contracts...`);
+      
+      const orderResult = await executeBuyOrder(settlementMint, outcomeMint, amount);
+      
+      const position: Position = {
+        ticker,
+        side,
+        entryPrice,
+        contracts: contracts,
+        entryTime: Date.now(),
+        entryTradeId: trade.trade_id,
+        transactionSignature: orderResult.signature,
+        executionMode: orderResult.executionMode,
+        isFilled: orderResult.executionMode === "sync", // Sync trades are immediately filled
+      };
+      
+            positions.set(ticker, position);
+            positionMomentumMetrics.set(ticker, metrics);
+
+            // Log entry with momentum context
+            logMomentumSignal({
+              timestamp: Date.now(),
+              ticker,
+              tradeId: trade.trade_id,
+              momentumMetrics: metrics,
+              triggeredEntry: true,
+              entryPrice,
+              contracts,
+            });
+
+            console.log(`✅ REAL POSITION OPENED: ${ticker}`, {
+        side: side.toUpperCase(),
+        contracts,
+        entryPrice,
+        entryPriceDollars: `$${(entryPrice / 100).toFixed(4)}`,
+        positionSize: `$${POSITION_SIZE_DOLLARS.toFixed(2)}`,
+        transactionSignature: orderResult.signature,
+        executionMode: orderResult.executionMode,
+      });
+      
+      // For async trades, check status after a delay
+      if (orderResult.executionMode === "async") {
+        setTimeout(async () => {
+          try {
+            const status = await checkOrderStatus(orderResult.signature);
+            if (status.status === "closed" && status.fills && status.fills.length > 0) {
+              position.isFilled = true;
+              console.log(`✅ Order ${orderResult.signature} filled`);
+            } else if (status.status === "failed") {
+              console.error(`❌ Order ${orderResult.signature} failed`);
+            }
+          } catch (error) {
+            console.error(`⚠️  Error checking order status:`, error);
+          }
+        }, 5000);
+      }
+    } catch (error) {
+      console.error(`❌ Failed to execute real trade for ${ticker}:`, error);
+      // Don't add to positions if trade failed
+      return;
+    }
+  }
 }
 
 /**
@@ -506,6 +657,165 @@ function calculatePnLPercentage(position: Position, currentPrice: number): numbe
 }
 
 /**
+ * Manually closes a position (called from UI)
+ * @param ticker The ticker to close
+ * @param reason Reason for closing (default: "Manual close")
+ * @returns Success status and error message if failed
+ */
+async function closePositionManually(ticker: string, reason: string = "Manual close"): Promise<{ success: boolean; error?: string }> {
+  const position = positions.get(ticker);
+  if (!position) {
+    return { success: false, error: "Position not found" };
+  }
+
+  const prices = await getCurrentPrice(ticker);
+  if (!prices) {
+    return { success: false, error: "Unable to fetch current price" };
+  }
+
+  const currentPrice = position.side === "yes" ? prices.yesPrice : prices.noPrice;
+  const pnl = calculatePnL(position, currentPrice);
+  const pnlPercent = calculatePnLPercentage(position, currentPrice);
+
+  if (PAPER_TRADE_ONLY) {
+    // Paper trading - just close the position
+    const exitTime = Date.now();
+    const duration = (exitTime - position.entryTime) / 1000;
+    const momentumMetrics = positionMomentumMetrics.get(ticker);
+    
+    const closedTrade: ClosedTrade = {
+      ticker,
+      side: position.side,
+      entryPrice: position.entryPrice,
+      exitPrice: currentPrice,
+      entryTime: position.entryTime,
+      exitTime,
+      duration,
+      pnl: pnl / 100, // Convert cents to dollars
+      pnlPercent,
+      reason,
+      momentumMetrics: momentumMetrics ? {
+        volume: momentumMetrics.totalVolume,
+        trades: momentumMetrics.tradeCount,
+        bias: momentumMetrics.directionalBias,
+        priceChange: momentumMetrics.priceChange,
+      } : undefined,
+    };
+    
+    closedTrades.push(closedTrade);
+    logTradeToFile(closedTrade);
+    positions.delete(ticker);
+    positionMomentumMetrics.delete(ticker);
+    
+    // ALWAYS record cooldown to prevent rapid re-entry on same ticker
+    const wasWin = pnl > 0;
+    tickerCooldowns.set(ticker, {
+      timestamp: Date.now(),
+      wasWin: wasWin,
+    });
+    
+    console.log(`📉 MANUALLY CLOSED PAPER POSITION: ${ticker}`, {
+      side: position.side.toUpperCase(),
+      entryPrice: position.entryPrice,
+      exitPrice: currentPrice,
+      pnl: `$${(pnl / 100).toFixed(2)}`,
+      pnlPercent: `${pnlPercent.toFixed(2)}%`,
+      duration: `${duration.toFixed(1)}s`,
+      reason,
+    });
+    
+    return { success: true };
+  } else {
+    // Real trading - execute sell order
+    try {
+      // For async trades, only close if order was filled
+      if (position.executionMode === "async" && !position.isFilled) {
+        return { success: false, error: "Order not yet filled" };
+      }
+      
+      // Get market data to extract outcome token mints
+      const market = await fetchMarket(ticker);
+      if (!market) {
+        return { success: false, error: "Failed to fetch market data" };
+      }
+      
+      const outcomeMints = getOutcomeTokenMints(market);
+      if (!outcomeMints) {
+        return { success: false, error: "Failed to extract outcome token mints" };
+      }
+      
+      // Determine outcome token mint based on position side
+      const outcomeMint = position.side === "yes" ? outcomeMints.yesMint : outcomeMints.noMint;
+      
+      // Settlement token (USDC)
+      const settlementMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"; // USDC
+      
+      // Get actual token balance from Solana
+      const outcomeTokenBalance = await getTokenBalance(outcomeMint);
+      
+      if (outcomeTokenBalance === 0) {
+        return { success: false, error: "No tokens found - position may not have filled" };
+      }
+      
+      console.log(`🔄 Manually closing REAL position: ${ticker} (balance: ${outcomeTokenBalance} tokens)...`);
+      
+      const sellResult = await executeSellOrder(outcomeMint, settlementMint, outcomeTokenBalance);
+      
+      const exitTime = Date.now();
+      const duration = (exitTime - position.entryTime) / 1000;
+      const momentumMetrics = positionMomentumMetrics.get(ticker);
+      
+      const closedTrade: ClosedTrade = {
+        ticker,
+        side: position.side,
+        entryPrice: position.entryPrice,
+        exitPrice: currentPrice,
+        entryTime: position.entryTime,
+        exitTime,
+        duration,
+        pnl: pnl / 100, // Convert cents to dollars
+        pnlPercent,
+        reason,
+        momentumMetrics: momentumMetrics ? {
+          volume: momentumMetrics.totalVolume,
+          trades: momentumMetrics.tradeCount,
+          bias: momentumMetrics.directionalBias,
+          priceChange: momentumMetrics.priceChange,
+        } : undefined,
+      };
+      
+      closedTrades.push(closedTrade);
+      logTradeToFile(closedTrade);
+      positions.delete(ticker);
+      positionMomentumMetrics.delete(ticker);
+      
+      // ALWAYS record cooldown to prevent rapid re-entry on same ticker
+      const wasWin = pnl > 0;
+      tickerCooldowns.set(ticker, {
+        timestamp: Date.now(),
+        wasWin: wasWin,
+      });
+      
+      console.log(`✅ MANUALLY CLOSED REAL POSITION: ${ticker}`, {
+        side: position.side.toUpperCase(),
+        entryPrice: position.entryPrice,
+        exitPrice: currentPrice,
+        pnl: `$${(pnl / 100).toFixed(2)}`,
+        pnlPercent: `${pnlPercent.toFixed(2)}%`,
+        duration: `${duration.toFixed(1)}s`,
+        reason,
+        transactionSignature: sellResult.signature,
+        executionMode: sellResult.executionMode,
+      });
+      
+      return { success: true };
+    } catch (error: any) {
+      return { success: false, error: error.message || "Failed to close position" };
+    }
+  }
+}
+
+/**
  * Checks all open positions for exit conditions (profit target or stop loss)
  * Also handles force-closing positions that can't get price data after timeout
  * Called periodically based on PRICE_CHECK_INTERVAL_MS
@@ -548,13 +858,11 @@ async function checkPositions(): Promise<void> {
         positions.delete(ticker);
         positionMomentumMetrics.delete(ticker);
         
-        // Record cooldown for force-closed positions (treat as loss)
-        if (LOSS_COOLDOWN_ENABLED) {
-          tickerCooldowns.set(ticker, {
-            timestamp: Date.now(),
-            wasWin: false,
-          });
-        }
+        // ALWAYS record cooldown for force-closed positions (treat as loss)
+        tickerCooldowns.set(ticker, {
+          timestamp: Date.now(),
+          wasWin: false,
+        });
         
         console.log(`⚠️  FORCE CLOSED POSITION: ${ticker} (unable to fetch price data)`);
         continue;
@@ -575,6 +883,15 @@ async function checkPositions(): Promise<void> {
     let shouldClose = false;
     let closeReason = "";
     
+    // Debug: Log position status every 30 seconds (to avoid spam)
+    const debugLogInterval = 30000; // 30 seconds
+    const lastLogTime = (position as any).lastDebugLogTime || 0;
+    const now = Date.now();
+    if (now - lastLogTime >= debugLogInterval) {
+      console.log(`🔍 Position: ${ticker} | Entry: ${position.entryPrice}¢ | Current: ${currentPrice}¢ | P&L: $${(pnl / 100).toFixed(2)} (${pnlPercent.toFixed(2)}%) | Target: ${PROFIT_TARGET !== null ? (PROFIT_TARGET * 100).toFixed(2) + '%' : 'none'} | Stop: ${STOP_LOSS !== null ? (-STOP_LOSS * 100).toFixed(2) + '%' : 'none'}`);
+      (position as any).lastDebugLogTime = now;
+    }
+    
     if (PROFIT_TARGET !== null && pnlPercent >= PROFIT_TARGET * 100) {
       shouldClose = true;
       closeReason = `Profit target reached (${pnlPercent.toFixed(2)}%)`;
@@ -584,53 +901,174 @@ async function checkPositions(): Promise<void> {
     }
     
     if (shouldClose) {
-      const exitTime = Date.now();
-      const duration = (exitTime - position.entryTime) / 1000;
-      
-      const momentumMetrics = positionMomentumMetrics.get(ticker);
-      
-      const closedTrade: ClosedTrade = {
-        ticker,
-        side: position.side,
-        entryPrice: position.entryPrice,
-        exitPrice: currentPrice,
-        entryTime: position.entryTime,
-        exitTime,
-        duration,
-        pnl: pnl / 100, // Convert cents to dollars
-        pnlPercent,
-        reason: closeReason,
-        momentumMetrics: momentumMetrics ? {
-          volume: momentumMetrics.totalVolume,
-          trades: momentumMetrics.tradeCount,
-          bias: momentumMetrics.directionalBias,
-          priceChange: momentumMetrics.priceChange,
-        } : undefined,
-      };
-      
-      closedTrades.push(closedTrade);
-      logTradeToFile(closedTrade);
-      positions.delete(ticker);
-      positionMomentumMetrics.delete(ticker);
-      
-      // Record cooldown if enabled
-      const wasWin = pnl > 0;
-      if ((wasWin && WIN_COOLDOWN_ENABLED) || (!wasWin && LOSS_COOLDOWN_ENABLED)) {
+      if (PAPER_TRADE_ONLY) {
+        // Paper trading - just close the position
+        const exitTime = Date.now();
+        const duration = (exitTime - position.entryTime) / 1000;
+        
+        const momentumMetrics = positionMomentumMetrics.get(ticker);
+        
+        const closedTrade: ClosedTrade = {
+          ticker,
+          side: position.side,
+          entryPrice: position.entryPrice,
+          exitPrice: currentPrice,
+          entryTime: position.entryTime,
+          exitTime,
+          duration,
+          pnl: pnl / 100, // Convert cents to dollars
+          pnlPercent,
+          reason: closeReason,
+          momentumMetrics: momentumMetrics ? {
+            volume: momentumMetrics.totalVolume,
+            trades: momentumMetrics.tradeCount,
+            bias: momentumMetrics.directionalBias,
+            priceChange: momentumMetrics.priceChange,
+          } : undefined,
+        };
+        
+        closedTrades.push(closedTrade);
+        logTradeToFile(closedTrade);
+        positions.delete(ticker);
+        positionMomentumMetrics.delete(ticker);
+        
+        // ALWAYS record cooldown to prevent rapid re-entry on same ticker
+        // This prevents the same ticker from being opened multiple times in quick succession
+        const wasWin = pnl > 0;
         tickerCooldowns.set(ticker, {
           timestamp: Date.now(),
           wasWin: wasWin,
         });
+        
+        console.log(`📉 CLOSED PAPER POSITION: ${ticker}`, {
+          side: position.side.toUpperCase(),
+          entryPrice: position.entryPrice,
+          exitPrice: currentPrice,
+          pnl: `$${(pnl / 100).toFixed(2)}`,
+          pnlPercent: `${pnlPercent.toFixed(2)}%`,
+          duration: `${duration.toFixed(1)}s`,
+          reason: closeReason,
+        });
+      } else {
+        // Real trading - execute sell order
+        // For async trades, only close if order was filled
+        if (position.executionMode === "async" && !position.isFilled) {
+          console.log(`⏳ Waiting for order ${position.transactionSignature} to fill before closing ${ticker}...`);
+          continue;
+        }
+        
+        try {
+          // Get market data to extract outcome token mints
+          const market = await fetchMarket(ticker);
+          if (!market) {
+            console.error(`❌ Cannot close real position: failed to fetch market data for ${ticker}`);
+            continue;
+          }
+          
+          const outcomeMints = getOutcomeTokenMints(market);
+          if (!outcomeMints) {
+            console.error(`❌ Cannot close real position: failed to extract outcome token mints for ${ticker}`);
+            continue;
+          }
+          
+          // Determine outcome token mint based on position side
+          const outcomeMint = position.side === "yes" ? outcomeMints.yesMint : outcomeMints.noMint;
+          
+          // Settlement token (USDC)
+          const settlementMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"; // USDC
+          
+          // Get actual token balance from Solana
+          const outcomeTokenBalance = await getTokenBalance(outcomeMint);
+          
+          if (outcomeTokenBalance === 0) {
+            console.warn(`⚠️  No outcome tokens found for ${ticker} - position may have already been closed or never filled`);
+            // Still close the position in our tracking
+            const exitTime = Date.now();
+            const duration = (exitTime - position.entryTime) / 1000;
+            const momentumMetrics = positionMomentumMetrics.get(ticker);
+            
+            const closedTrade: ClosedTrade = {
+              ticker,
+              side: position.side,
+              entryPrice: position.entryPrice,
+              exitPrice: currentPrice,
+              entryTime: position.entryTime,
+              exitTime,
+              duration,
+              pnl: pnl / 100,
+              pnlPercent,
+              reason: `${closeReason} (no tokens found - may not have filled)`,
+              momentumMetrics: momentumMetrics ? {
+                volume: momentumMetrics.totalVolume,
+                trades: momentumMetrics.tradeCount,
+                bias: momentumMetrics.directionalBias,
+                priceChange: momentumMetrics.priceChange,
+              } : undefined,
+            };
+            
+            closedTrades.push(closedTrade);
+            logTradeToFile(closedTrade);
+            positions.delete(ticker);
+            positionMomentumMetrics.delete(ticker);
+            continue;
+          }
+          
+          console.log(`🔄 Closing REAL position: ${ticker} (balance: ${outcomeTokenBalance} tokens)...`);
+          
+          const sellResult = await executeSellOrder(outcomeMint, settlementMint, outcomeTokenBalance);
+          
+          const exitTime = Date.now();
+          const duration = (exitTime - position.entryTime) / 1000;
+          
+          const momentumMetrics = positionMomentumMetrics.get(ticker);
+          
+          const closedTrade: ClosedTrade = {
+            ticker,
+            side: position.side,
+            entryPrice: position.entryPrice,
+            exitPrice: currentPrice,
+            entryTime: position.entryTime,
+            exitTime,
+            duration,
+            pnl: pnl / 100, // Convert cents to dollars
+            pnlPercent,
+            reason: closeReason,
+            momentumMetrics: momentumMetrics ? {
+              volume: momentumMetrics.totalVolume,
+              trades: momentumMetrics.tradeCount,
+              bias: momentumMetrics.directionalBias,
+              priceChange: momentumMetrics.priceChange,
+            } : undefined,
+          };
+          
+          closedTrades.push(closedTrade);
+          logTradeToFile(closedTrade);
+          positions.delete(ticker);
+          positionMomentumMetrics.delete(ticker);
+          
+          // ALWAYS record cooldown to prevent rapid re-entry on same ticker
+          const wasWin = pnl > 0;
+          tickerCooldowns.set(ticker, {
+            timestamp: Date.now(),
+            wasWin: wasWin,
+          });
+          
+          console.log(`✅ REAL POSITION CLOSED: ${ticker}`, {
+            side: position.side.toUpperCase(),
+            entryPrice: position.entryPrice,
+            exitPrice: currentPrice,
+            pnl: `$${(pnl / 100).toFixed(2)}`,
+            pnlPercent: `${pnlPercent.toFixed(2)}%`,
+            duration: `${duration.toFixed(1)}s`,
+            reason: closeReason,
+            transactionSignature: sellResult.signature,
+            executionMode: sellResult.executionMode,
+          });
+        } catch (error) {
+          console.error(`❌ Failed to close real position for ${ticker}:`, error);
+          // Position remains open - will retry on next check
+        }
       }
-      
-      console.log(`📉 CLOSED POSITION: ${ticker}`, {
-        side: position.side.toUpperCase(),
-        entryPrice: position.entryPrice,
-        exitPrice: currentPrice,
-        pnl: `$${(pnl / 100).toFixed(2)}`,
-        pnlPercent: `${pnlPercent.toFixed(2)}%`,
-        duration: `${duration.toFixed(1)}s`,
-        reason: closeReason,
-      });
     } else {
       // Only log position updates if P&L changed significantly (more than 0.5% change)
       // Store last logged P&L to compare
@@ -719,23 +1157,63 @@ function setupWebSocketHandlers(websocket: WebSocket) {
       // Check momentum
       const hasMomentum = checkMomentum(trade.market_ticker);
       
+      // Get momentum metrics for logging (even if not triggered)
+      const metrics = calculateMomentumMetrics(trade.market_ticker);
+      
       if (!hasMomentum) {
         if (SHOW_MOMENTUM_BUILDING) {
           console.log(`Momentum building: ${trade.market_ticker} (not yet triggered)`);
+        }
+        // Log momentum signal that didn't trigger
+        if (metrics) {
+          logMomentumSignal({
+            timestamp: Date.now(),
+            ticker: trade.market_ticker,
+            tradeId: trade.trade_id,
+            momentumMetrics: metrics,
+            triggeredEntry: false,
+            reason: "Below momentum thresholds",
+          });
         }
         return;
       }
 
       // Momentum threshold met - this is a candidate for copy trading
-      const metrics = calculateMomentumMetrics(trade.market_ticker);
       if (!metrics) {
         return;
       }
       
+      // Check if we can open a position
+      let entryReason: string | undefined;
+      if (positions.has(trade.market_ticker)) {
+        entryReason = "Already have position";
+      } else if (positions.size >= MAX_OPEN_POSITIONS) {
+        entryReason = `Max positions reached (${MAX_OPEN_POSITIONS})`;
+      } else {
+        // Check cooldown
+        const cooldown = tickerCooldowns.get(trade.market_ticker);
+        if (cooldown) {
+          const cooldownAge = Date.now() - cooldown.timestamp;
+          if (cooldownAge < COOLDOWN_TIME_MS) {
+            entryReason = `In cooldown (${((COOLDOWN_TIME_MS - cooldownAge) / 1000).toFixed(0)}s remaining)`;
+          }
+        }
+      }
+      
+      // Log momentum signal (whether it triggers entry or not)
+      logMomentumSignal({
+        timestamp: Date.now(),
+        ticker: trade.market_ticker,
+        tradeId: trade.trade_id,
+        momentumMetrics: metrics,
+        triggeredEntry: entryReason === undefined,
+        reason: entryReason,
+      });
+      
       // Only open if we don't already have a position
       if (!positions.has(trade.market_ticker)) {
-        // Open paper trade position (will log internally if successful)
-        openPosition(trade, metrics);
+        // Open position (paper or real trading, will log internally if successful)
+        await openPosition(trade, metrics);
       }
     }
   };
@@ -785,26 +1263,71 @@ function connectWebSocket() {
   }
 }
 
+// Shutdown flag to prevent multiple shutdown attempts
+let isShuttingDown = false;
+
 // Handle graceful shutdown
-process.on("SIGINT", () => {
+function gracefulShutdown() {
+  if (isShuttingDown) {
+    return; // Already shutting down
+  }
+  isShuttingDown = true;
+  
   console.log("\n🛑 Shutting down gracefully...");
   isIntentionallyClosing = true;
+  
+  // Stop all timers and connections
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
+    reconnectTimer = null;
   }
   if (ws) {
+    ws.removeAllListeners();
     ws.close();
+    ws = null;
   }
   if (priceCheckInterval) {
     clearInterval(priceCheckInterval);
+    priceCheckInterval = null;
   }
   if (metricsInterval) {
     clearInterval(metricsInterval);
+    metricsInterval = null;
   }
-  process.exit(0);
+  
+  // Close HTTP server with timeout
+  const shutdownTimeout = setTimeout(() => {
+    console.log("⚠️  Shutdown timeout - forcing exit");
+    process.exit(1);
+  }, 5000); // 5 second timeout
+  
+  stopServer()
+    .then(() => {
+      clearTimeout(shutdownTimeout);
+      process.exit(0);
+    })
+    .catch((error) => {
+      console.error("Error during shutdown:", error);
+      clearTimeout(shutdownTimeout);
+      process.exit(1);
+    });
+}
+
+process.on("SIGINT", gracefulShutdown);
+process.on("SIGTERM", gracefulShutdown);
+
+// Start HTTP server for UI
+startServer(UI_PORT, { 
+  positions,
+  closedTrades,
+  getCurrentPrice,
+  fetchMarket,
+  closePosition: closePositionManually,
+}).catch((error) => {
+  console.error("Failed to start UI server:", error);
 });
 
-// Initial connection
+// Initial WebSocket connection
 connectWebSocket();
 
 

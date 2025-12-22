@@ -1,6 +1,6 @@
 # DFlow Copy Trading Bot
 
-A TypeScript CLI tool for automated copy trading on DFlow's Kalshi prediction markets using real-time momentum detection and paper trading.
+A TypeScript CLI tool for automated copy trading on DFlow's Kalshi prediction markets using real-time momentum detection and paper trading. Includes a web-based dashboard for monitoring active positions.
 
 ## Overview
 
@@ -24,6 +24,10 @@ This is provided as-is, for educational and experimental purposes. Paper trade f
 
 _TL;DR: This is WIP experimental code. Use it, break it, improve it, but if you lose money, that's on you, not me._
 
+## ⚠️ WIP
+
+This repo has code to actually execute trades, but it's a WIP and has NOT been tested it. It was written by an AI and is not to be trusted until I've reviewed it.
+
 ## How It Works
 
 ### Architecture
@@ -33,6 +37,8 @@ The bot operates in three main phases:
 1. **Market Filtering** - Filters markets by minimum liquidity threshold
 2. **Momentum Detection** - Analyzes recent trade activity to identify strong directional momentum
 3. **Position Management** - Opens paper positions, monitors P&L, and closes based on profit targets or stop losses
+
+Additionally, the bot includes a **Web Dashboard** that provides real-time monitoring of active positions via a local HTTP server.
 
 ### Algorithm Details
 
@@ -245,6 +251,13 @@ COOLDOWN_TIME=60000
 RECONNECT_DELAY_MS=5000
 ```
 
+### Web Dashboard
+
+```env
+# Port for the web dashboard UI (default: 3001)
+UI_PORT=3001
+```
+
 ## Usage
 
 ### Development Mode
@@ -275,6 +288,7 @@ Momentum config: window=60s, minVolume=750, minTrades=6, minBias=0.75
 Paper trading: positionSize=$1.00 (fixed dollar amount), maxPositions=10, profitTarget=2.5%, stopLoss=12%
 Cooldown: loss=enabled, win=disabled, time=60s
 📝 Trades will be logged to: /path/to/trades.jsonl
+🌐 UI server running on http://localhost:3001
 ```
 
 **During Operation**:
@@ -287,6 +301,30 @@ Cooldown: loss=enabled, win=disabled, time=60s
 **Every 5 Minutes**:
 
 - Performance metrics summary (if trades have occurred)
+
+### Web Dashboard
+
+The bot includes a web-based dashboard accessible at `http://localhost:3001` (or your configured `UI_PORT`).
+
+**Features**:
+
+- **Real-time Position Monitoring**: View all open positions with live updates
+- **Position Details**: See ticker, side (YES/NO), entry price, contracts, and entry time
+- **Auto-refresh**: Dashboard automatically refreshes every 5 seconds
+- **Clean UI**: Modern, minimal interface using a fintech-inspired color palette
+
+**Accessing the Dashboard**:
+
+1. Start the bot: `npm run dev` or `npm start`
+2. Open your browser to `http://localhost:3001`
+3. The dashboard will display all currently open positions
+
+**API Endpoints**:
+
+- `GET /` - Dashboard HTML page
+- `GET /api/positions` - JSON API returning current positions
+
+The dashboard is served from the same process as the trading bot, so it automatically has access to the latest position data.
 
 ## Performance Metrics
 
@@ -429,6 +467,23 @@ cat trades.jsonl | jq -s 'map(.duration) | add / length'
 - Consider adding minimum price filter (avoid very low-priced, volatile markets)
 - Review if stop loss is too tight
 
+## Project Structure
+
+The codebase is organized into modular components:
+
+```
+src/
+  ├── index.ts          # Main bot logic (WebSocket, trading, momentum detection)
+  ├── server.ts         # HTTP server setup for web dashboard
+  ├── api/
+  │   └── routes.ts     # API route handlers
+  ├── ui/
+  │   ├── colors.ts     # Color palette configuration
+  │   └── dashboard.ts  # HTML dashboard template
+  ├── trade-executor.ts # Real trading execution (Solana/DFlow integration)
+  └── types.ts          # TypeScript type definitions
+```
+
 ## Technical Details
 
 ### Data Flow
@@ -439,6 +494,7 @@ cat trades.jsonl | jq -s 'map(.duration) | add / length'
 4. **Momentum Window**: Maintains rolling window of recent trades per ticker
 5. **Position Tracking**: In-memory Map of open positions
 6. **Price Monitoring**: Periodic REST API calls to check current prices
+7. **HTTP Server**: Serves web dashboard and API endpoints for UI access
 
 ### Price Calculation
 
@@ -469,7 +525,7 @@ Potential improvements:
 - Historical backtesting capability
 - Multiple strategy variants running in parallel
 - Machine learning for momentum pattern recognition
-- Real-time dashboard/visualization
+- Enhanced dashboard features (P&L display, historical trades, close trade button)
 - Integration with actual trading APIs
 - Advanced risk management (position sizing, correlation limits)
 
